@@ -1,6 +1,6 @@
 [project]
-name = "sp-chat-ai-core"
-version = "0.2.1"
+name = "sp_chat_ai_core_yamabiko"
+version = "0.1.0"
 description = "chat AI core"
 requires-python = ">=3.10,<3.13"
 
@@ -28,6 +28,9 @@ dependencies = [
   # Japanese NLP
   "janome>=0.5.0,<1",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["sp_chat_ai_core_yamabiko"]
 
 [build-system]
 requires = ["hatchling>=1.25.0"]
