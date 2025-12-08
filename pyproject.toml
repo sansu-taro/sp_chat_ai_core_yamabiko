@@ -1,0 +1,37 @@
+[project]
+name = "sp-chat-ai-core"
+version = "0.2.1"
+description = "chat AI core"
+requires-python = ">=3.10,<3.13"
+
+dependencies = [
+  # Core
+  "pydantic[email]>=2.11.7,<3",
+  "langchain-core>=0.3.26,<0.4",
+  "langgraph>=0.6.2,<0.7",
+  "openai>=1.17,<2",                 # AzureOpenAIは1.xでOK（prodが1.98でも互換）
+  "rank-bm25>=0.2.2",
+  "pandas>=2.3.1,<2.4",              # テスト2.2系でも実害なし。2.4未満に統一
+  "numpy>=1.26,<2",                  # 2.x流入防止（ML系壊れ対策）
+
+  # LLM (Gemini) — 新ライブラリに統一
+  "google-genai>=1.45.0",
+
+  # GCP
+  "google-cloud-secret-manager>=2.24.0,<3",
+  "google-cloud-bigquery>=3.35.1,<4",
+  "google-cloud-bigquery-storage>=2.32.0,<3",
+  "db-dtypes>=1.4.3,<2",
+  "google-cloud-spanner>=3.56.0,<4",
+  "google-cloud-firestore>=2.14.0,<3",
+
+  # Japanese NLP
+  "janome>=0.5.0,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[tool.uv]  # あれば
+# uv 特有の設定があればここに追記

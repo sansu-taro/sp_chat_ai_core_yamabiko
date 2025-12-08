@@ -1,0 +1,15 @@
+pydantic>=2.11.7
+langchain-core>=0.3.72
+langgraph>=0.6.2
+openai>=1.98.0
+rank-bm25>=0.2.2
+pandas>=2.3.1
+numpy>=1.26
+google-generativeai>=0.8.5
+google-cloud-secret-manager>=2.24.0
+google-cloud-bigquery>=3.35.1
+google-cloud-bigquery-storage>=2.32.0
+db-dtypes>=1.4.3
+google-cloud-spanner>=3.56.0
+google-cloud-firestore>=2.14.0
+janome>=0.5.0

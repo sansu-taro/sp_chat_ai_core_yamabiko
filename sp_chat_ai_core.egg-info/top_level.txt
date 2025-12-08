@@ -1,0 +1,1 @@
+sp_chat_ai_core

@@ -1,0 +1,14 @@
+pyproject.toml
+sp_chat_ai_core/__init__.py
+sp_chat_ai_core/chat_engine_adk_bq.py
+sp_chat_ai_core/chat_memory.py
+sp_chat_ai_core/firestore_functions.py
+sp_chat_ai_core/firestore_memory.py
+sp_chat_ai_core/google_secret_manager.py
+sp_chat_ai_core/retriever_adk_bq.py
+sp_chat_ai_core/support_operation_agent.py
+sp_chat_ai_core.egg-info/PKG-INFO
+sp_chat_ai_core.egg-info/SOURCES.txt
+sp_chat_ai_core.egg-info/dependency_links.txt
+sp_chat_ai_core.egg-info/requires.txt
+sp_chat_ai_core.egg-info/top_level.txt

@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: sp-chat-ai-core
+Version: 0.1.1
+Summary: chat AI core
+Requires-Python: <3.13,>=3.10
+Requires-Dist: pydantic>=2.11.7
+Requires-Dist: langchain-core>=0.3.72
+Requires-Dist: langgraph>=0.6.2
+Requires-Dist: openai>=1.98.0
+Requires-Dist: rank-bm25>=0.2.2
+Requires-Dist: pandas>=2.3.1
+Requires-Dist: numpy>=1.26
+Requires-Dist: google-generativeai>=0.8.5
+Requires-Dist: google-cloud-secret-manager>=2.24.0
+Requires-Dist: google-cloud-bigquery>=3.35.1
+Requires-Dist: google-cloud-bigquery-storage>=2.32.0
+Requires-Dist: db-dtypes>=1.4.3
+Requires-Dist: google-cloud-spanner>=3.56.0
+Requires-Dist: google-cloud-firestore>=2.14.0
+Requires-Dist: janome>=0.5.0
