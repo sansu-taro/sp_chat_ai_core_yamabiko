@@ -6,7 +6,7 @@ from langchain_core.messages import (
     BaseMessage, messages_to_dict, messages_from_dict, HumanMessage, AIMessage
 )
 # sp_chatbot.memory_base のパスは環境に合わせてください
-from sp_chatbot.memory_base import BaseMemory 
+from .chat_memory import BaseMemory 
 
 # ログ設定
 logging.basicConfig(

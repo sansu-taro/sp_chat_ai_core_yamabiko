@@ -1165,8 +1165,8 @@ wheels = [
 ]
 
 [[package]]
-name = "sp-chat-ai-core"
-version = "0.1.9"
+name = "sp-chat-ai-core-yamabiko"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "db-dtypes" },
