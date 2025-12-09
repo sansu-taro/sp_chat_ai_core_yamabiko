@@ -115,7 +115,6 @@ class AdkChatbot:
             ---
         """)
         
-    #def _get_information_for_query(self, query: str) -> tuple[str, str]:
     def _get_information_for_query(
             self,
             query: str,
@@ -140,6 +139,8 @@ class AdkChatbot:
             session_id=session_id,
             message_index=message_index,
         )
+        # ★ 追加: メタデータの抽出 (Retrieverが返していれば)
+        search_meta = search_results.get("search_meta", {})
         
         # 3. 検索結果を整形
         
@@ -157,15 +158,23 @@ class AdkChatbot:
             knowledge_urls = knowledge.get("url", [])
             knowledge_titles = knowledge.get("titles", [])
             knowledge_ids = knowledge.get("ids", [])
-            for i, (know_text, knowledge_url, knowledge_title, global_content_id) in enumerate(
-                zip(knowledges, knowledge_urls, knowledge_titles, knowledge_ids)
+            knowledge_props = knowledge.get("properties", [])
+            for i, (know_text, knowledge_url, knowledge_title, global_content_id, know_prop) in enumerate(
+                zip(knowledges, knowledge_urls, knowledge_titles, knowledge_ids, knowledge_props)
             ):
-                # ★ ここでナレッジ本文だけ見出しを1段下げ（## の子要素になるように）
                 demoted = demote_md_headings_outside_code(know_text, offset=1, min_level=3)
+                
+                # ★ 辞書をJSON文字列に変換 (日本語が見えるように ensure_ascii=False)
+                # know_prop が空辞書 {} の場合は "なし" としても良い
+                if know_prop:
+                    prop_str = json.dumps(know_prop, ensure_ascii=False)
+                else:
+                    prop_str = "特になし"
                 # AI向け
                 ai_knowledge_section += (
                     f"## ナレッジ_{i+1}\n"
                     f"**タイトル:** {knowledge_title}\n"
+                    f"**属性情報(Properties):** {prop_str}\n"
                     f"**本文_{i+1}:**\n{demoted}\n\n"
                 )
                 # 人間向け（必要ならそのまま／あるいは同じdemotedでもOK）
@@ -174,6 +183,7 @@ class AdkChatbot:
                     f"**参照URL:** [ナレッジへのリンク]({knowledge_url})\n"
                     f"**content_id:** `{global_content_id}`\n"
                     f"**タイトル:** {knowledge_title}\n"
+                    f"**Properties:** {prop_str}\n"
                     f"**本文_{i+1}:**\n{demoted}\n\n"
                 )
             ai_readable_sections.append(ai_knowledge_section.strip())
@@ -212,10 +222,12 @@ class AdkChatbot:
         # 検索結果が何もなければ、その旨を両方の戻り値に設定
         if not ai_readable_sections:
             no_info_message = "関連する情報はナレッジベースや過去の会話ログには見つかりませんでした。"
-            return no_info_message, no_info_message
+            return no_info_message, no_info_message,{"is_knowledge_missing": True}
         
-        # AI向けと人間向けの整形済み文字列をそれぞれ結合してタプルで返す
-        return "\n\n".join(ai_readable_sections), "\n\n".join(human_readable_sections)
+        # # AI向けと人間向けの整形済み文字列をそれぞれ結合してタプルで返す
+        # return "\n\n".join(ai_readable_sections), "\n\n".join(human_readable_sections)
+        # ★ 追加: 3つ目の戻り値として search_meta を返す
+        return "\n\n".join(ai_readable_sections), "\n\n".join(human_readable_sections), search_meta
 
     
     def create_session(self) -> str:
