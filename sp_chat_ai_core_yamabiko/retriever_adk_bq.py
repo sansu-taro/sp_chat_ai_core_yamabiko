@@ -25,8 +25,11 @@ _thread_local = threading.local()
 BIGQUERY_PROJECT_ID = "smarthr-customer-support"
 BIGQUERY_DATASET_ID = "sandbox"
 
-VECTOR_TABLE_BQ = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.knowledges_vector"
-QA_TABLE_BQ     = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.knowledges_qa_part_id_fill"
+
+# VECTOR_TABLE_BQ = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.knowledges_vector_v2"
+# QA_TABLE_BQ     = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.knowledges_qa_part_id_fill"
+VECTOR_TABLE_BQ = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.knowledges_vector_v2_202411_202511"
+QA_TABLE_BQ     = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.knowledges_qa_part_id_fill_2025"
 LOG_TABLE_BQ    = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.retrieval_logs"
 
 SPANNER_PROJECT_ID  = "smarthr-customer-support"
@@ -43,7 +46,7 @@ BLEND_ALPHA  = 0.7
 BLEND_BETA   = 0.3
 KEEP_TOPK    = 10
 FINAL_TOPN   = 3  # 呼び出し側で上書き可
-JAP_PUNCT = "。、！？”“「」『』（）()［］[]｛｝{}・…：；．，／＼｜ー〜~"
+JAP_PUNCT = "。、！？”“「」『』（）()［］[]｛｝{}・…：；．，／＼｜〜~"
 RE_CTRL   = re.compile(r"[\u0000-\u001F\u007F]")               # 制御文字
 RE_URL    = re.compile(r"https?://\S+")
 RE_SPACE  = re.compile(r"\s+")
@@ -70,7 +73,7 @@ DEFAULT_STOPWORDS: Set[str] = set(
      "問題","ギリギリ","回答","間際","連絡","丁寧","有難く","有難く","今後","有難かっ","嬉しく","不明",
      "理解","検討","間違い","是非", "利用", "宜しく","良い","実感","返信","お手数","通り","認識","便利",
      "解決","確認","実現", "感激","承知","小さ","願い事","改善","素晴らしい","お知らせ","お忙しい",
-     "弊社","心待ち","対処","質問","伺い","背景","SmartHR","状況"
+     "弊社","心待ち","対処","質問","伺い","背景","SmartHR","状況","情報","管理","機能",
     ]
 )
 
@@ -227,11 +230,10 @@ class RefactoredRetriever:
                 seen.add(t)        
         compact = uniq[:max_terms]
         # Spanner SEARCH用に AND 連結（必要に応じて " ".join(compact) に変更可）
+        #re_token = " | ".join(compact)
         re_token = " AND ".join(compact)
-        # デバッグログ
-        print(re_token)
+        
         return re_token
-
 
 
     # ---------- Public API ----------
@@ -245,35 +247,50 @@ class RefactoredRetriever:
     ) -> Dict[str, Any]:
         self.logger.info(f"検索開始: query='{query_text}', session_id='{session_id}'")
         # 1) Spanner: 全文 × ベクトル（非パーティション index）
-        sp_df = self._search_knowledge_fulltext_and_vector(
+        # sp_df = self._search_knowledge_fulltext_and_vector(
+        #     query_text=query_text,
+        #     query_vector=query_vector,
+        #     top_n=60,
+        #     alpha_vec=0.60, beta_ft=0.40
+        # )
+        
+        # if sp_df is None or sp_df.empty:
+        #     # フォールバック：従来のベクトル→BM25ブレンド
+        #     fb = self._search_knowledge_by_vector_and_bm25(
+        #         query_text=query_text,
+        #         query_vector=query_vector,
+        #         top_n_per_source=3,
+        #         initial_fetch_limit=100,
+        #         alpha_vec=0.60,
+        #         beta_bm25=0.40,
+        #         topic_gate=True,
+        #         topic_threshold=0.30,
+        #     )
+        #     knowledge_results = fb
+        # else:
+        #     knowledge_results = self._finalize_knowledge_candidates(
+        #         df=sp_df,
+        #         query_text=query_text,
+        #         top_n_per_source=3,
+        #         final_top_n=10,
+        #         #topic_gate=True,
+        #         topic_gate=False,
+        #         topic_threshold=0.30,
+        #         source_bias=None
+        #     )
+
+        fb = self._search_knowledge_by_vector_and_bm25(
             query_text=query_text,
             query_vector=query_vector,
-            top_n=60,
-            alpha_vec=0.60, beta_ft=0.40
+            top_n_per_source=3,
+            initial_fetch_limit=100,
+            alpha_vec=0.60,
+            beta_bm25=0.40,
+            #topic_gate=True,
+            topic_gate=False,
+            topic_threshold=0.30,
         )
-        if sp_df is None or sp_df.empty:
-            # フォールバック：従来のベクトル→BM25ブレンド
-            fb = self._search_knowledge_by_vector_and_bm25(
-                query_text=query_text,
-                query_vector=query_vector,
-                top_n_per_source=3,
-                initial_fetch_limit=100,
-                alpha_vec=0.60,
-                beta_bm25=0.40,
-                topic_gate=True,
-                topic_threshold=0.30,
-            )
-            knowledge_results = fb
-        else:
-            knowledge_results = self._finalize_knowledge_candidates(
-                df=sp_df,
-                query_text=query_text,
-                top_n_per_source=3,
-                final_top_n=10,
-                topic_gate=True,
-                topic_threshold=0.30,
-                source_bias=None
-            )
+        knowledge_results = fb
         # 2) BigQuery: 既存ロジックのまま
         vec_hits = self._search_similar_conversations_by_vector_bq(query_vector, top_n=VEC_TOPK)
         best_responses_df = self._rerank_with_bm25_and_blend(query_text, vec_hits, top_n=top_n)
@@ -287,11 +304,29 @@ class RefactoredRetriever:
             message_index=message_index,
         )
         self.logger.info("検索完了")
+
+        # --- ★ 追加・変更点: ヒット状況のメタデータを生成 ---
+        
+        # 公式ナレッジ(Spanner)のヒット数
+        kb_hit_count = len(knowledge_results.get("ids", []))
+        
+        # 過去QA(BQ)のヒット数
+        qa_hit_count = len(best_responses_df) if isinstance(best_responses_df, pd.DataFrame) else 0
+
+        # 公式情報が欠落しているかどうかのフラグ
+        # (QAはあるのにナレッジがない場合 True)
+        is_knowledge_missing = (kb_hit_count == 0) and (qa_hit_count > 0)
         
         return {
             "knowledge": knowledge_results,
             "best_responses": best_responses_df.to_dict(orient="records")
-            if isinstance(best_responses_df, pd.DataFrame) and not best_responses_df.empty else []
+            if isinstance(best_responses_df, pd.DataFrame) and not best_responses_df.empty else [],
+            # Agent側で判断に使うためのメタデータ
+            "search_meta": {
+                "kb_hit_count": kb_hit_count,
+                "qa_hit_count": qa_hit_count,
+                "is_knowledge_missing": is_knowledge_missing  # これが重要
+            }
         }
 
 
@@ -327,24 +362,81 @@ class RefactoredRetriever:
             self.logger.error(f"BigQueryログ書込エラー: {e}", exc_info=True)
 
     # ---------- Similar Conversations (BQ Vector) ----------
+    # def _search_similar_conversations_by_vector_bq(self, query_vector: np.ndarray, top_n: int = VEC_TOPK) -> List[Dict[str, Any]]:
+    #     sql = f"""
+    #     SELECT conversation_id, COSINE_DISTANCE(vector, @query_vector) AS distance
+    #     FROM `{VECTOR_TABLE_BQ}`
+    #     ORDER BY distance
+    #     LIMIT @limit
+    #     """
+    #     job_config = bigquery.QueryJobConfig(
+    #         query_parameters=[
+    #             bigquery.ArrayQueryParameter("query_vector", "FLOAT64", query_vector.tolist()),
+    #             bigquery.ScalarQueryParameter("limit", "INT64", top_n),
+    #         ]
+    #     )
+    #     try:
+    #         rows = list(self.bq_client.query(sql, job_config=job_config).result())
+    #         return [{"conversation_id": r.conversation_id, "distance": float(r.distance)} for r in rows]
+    #     except Exception as e:
+    #         self.logger.error(f"会話検索エラー: {e}", exc_info=True)
+    #         return []
+
+
+    # ---------- Similar Conversations (BQ Vector) 最適化入----------
     def _search_similar_conversations_by_vector_bq(self, query_vector: np.ndarray, top_n: int = VEC_TOPK) -> List[Dict[str, Any]]:
+        # 検索対象期間の設定（例: 2024年以降のデータのみ対象にする）
+        # ※ここを古い日付にすれば全期間検索になるが、パーティションの恩恵を受けるには日付指定が推奨
+        search_since = "2024-01-01 00:00:00"
+        search_end = "2025-10-01 00:00:00"
+
         sql = f"""
-        SELECT conversation_id, COSINE_DISTANCE(vector, @query_vector) AS distance
-        FROM `{VECTOR_TABLE_BQ}`
-        ORDER BY distance
+        SELECT 
+            base.conversation_id, 
+            distance
+        FROM VECTOR_SEARCH(
+            TABLE `{VECTOR_TABLE_BQ}`,
+            'vector',
+            (SELECT @query_vector AS vector),
+            top_k => @fetch_k, 
+            options => '{{"fraction_lists_to_search": 0.05}}'
+        )
+        WHERE 
+            -- パーティションプルーニング: この日付以前のデータはスキャンされず課金されません
+            base.created_at >= TIMESTAMP(@search_since, 'Asia/Tokyo')
+            AND base.created_at <= TIMESTAMP(@search_end, 'Asia/Tokyo')
+        ORDER BY distance ASC
         LIMIT @limit
         """
+        
+        # VECTOR_SEARCHは絞り込みで減る可能性があるので、要求(top_n)の倍くらい候補を取るのが定石です
+        fetch_k = top_n * 2 
+
+        # job_config = bigquery.QueryJobConfig(
+        #     query_parameters=[
+        #         bigquery.ArrayQueryParameter("query_vector", "FLOAT64", query_vector.tolist()),
+        #         bigquery.ScalarQueryParameter("limit", "INT64", top_n),
+        #         bigquery.ScalarQueryParameter("fetch_k", "INT64", fetch_k),
+        #         bigquery.ScalarQueryParameter("search_since", "STRING", search_since),
+        #     ]
+        # )
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ArrayQueryParameter("query_vector", "FLOAT64", query_vector.tolist()),
                 bigquery.ScalarQueryParameter("limit", "INT64", top_n),
+                bigquery.ScalarQueryParameter("fetch_k", "INT64", fetch_k),
+                bigquery.ScalarQueryParameter("search_since", "STRING", search_since),
+                # 【修正2】search_end パラメータを追加
+                bigquery.ScalarQueryParameter("search_end", "STRING", search_end),
             ]
         )
+        
         try:
+            # VECTOR_SEARCHの結果は base.カラム名 でアクセスします
             rows = list(self.bq_client.query(sql, job_config=job_config).result())
             return [{"conversation_id": r.conversation_id, "distance": float(r.distance)} for r in rows]
         except Exception as e:
-            self.logger.error(f"会話検索エラー: {e}", exc_info=True)
+            self.logger.error(f"会話検索エラー(Vector Search): {e}", exc_info=True)
             return []
 
     # ---------- Knowledge (Spanner) with Vector+BM25+Topic Gate ----------
@@ -363,10 +455,15 @@ class RefactoredRetriever:
         self.logger.info(f"[kn_blend] fetch top{initial_fetch_limit} by vector...")
         sql = f"""
         SELECT
-          global_content_id, title, {BODY_COLUMN_SPN} AS body, category, url, source_id,
-          COSINE_DISTANCE({VECTOR_COLUMN_SPN}, @query_vector) AS distance
-        FROM {KNOWLEDGES_TABLE}
-        WHERE {VECTOR_COLUMN_SPN} IS NOT NULL AND is_deprecated = False
+          k.global_content_id, k.title, {BODY_COLUMN_SPN} AS body, k.category, k.url, k.source_id,
+          COSINE_DISTANCE({VECTOR_COLUMN_SPN}, @query_vector) AS distance,
+          ARRAY(
+            SELECT AS STRUCT p.property_type, p.property_value
+            FROM properties AS p
+            WHERE p.global_content_id = k.global_content_id
+          ) AS props_struct
+        FROM {KNOWLEDGES_TABLE} AS k
+        WHERE {VECTOR_COLUMN_SPN} IS NOT NULL AND k.is_deprecated = False
         ORDER BY distance
         LIMIT @limit
         """
@@ -375,18 +472,31 @@ class RefactoredRetriever:
             "query_vector": param_types.Array(param_types.FLOAT64),
             "limit": param_types.INT64
         }
-
+        
         rows: List[Dict[str, Any]] = []
         try:
             with self.spanner_db.snapshot() as snapshot:
                 for r in snapshot.execute_sql(sql, params=params, param_types=param_types_map):
+                    # インデックス対応:
+                    # 0:id, 1:title, 2:body, 3:cat, 4:url, 5:source_id
+                    # 6:distance (float)  <-- ここがズレないように維持
+                    # 7:props_struct (ARRAY) <-- 最後に追加
+
+                    raw_props = r[7] # ★最後尾
+                    props_dict = {}
+                    if raw_props:
+                        for item in raw_props:
+                            props_dict[item[0]] = item[1]
+
                     rows.append({
                         "id": r[0], "title": r[1], "body": r[2], "category": r[3],
-                        "url": r[4], "source_id": r[5], "distance": float(r[6]),
+                        "url": r[4], "source_id": r[5],
+                        "distance": float(r[6]),  # ★ここは r[6] のまま
+                        "properties": props_dict, 
                     })
         except Exception as e:
             self.logger.error(f"[kn_blend] Spanner error: {e}", exc_info=True)
-            return {"url": [], "category": [], "knowledges": [], "titles": [], "ids": [], "source_ids": [], "scores": []}
+            return {"url": [], "category": [], "knowledges": [], "titles": [], "ids": [], "source_ids": [], "scores": [], "properties": []}
 
         if not rows:
             return {"url": [], "category": [], "knowledges": [], "titles": [], "ids": [], "source_ids": [], "scores": []}
@@ -441,6 +551,7 @@ class RefactoredRetriever:
             "ids":        balanced["id"].tolist(),
             "source_ids": balanced["source_id"].tolist(),
             "scores":     balanced["blended_score"].tolist(),
+            "properties": balanced["properties"].tolist(), # ★ 追加
         }
 
 
@@ -457,7 +568,7 @@ class RefactoredRetriever:
         if df is None or df.empty:
             return {
                 "url": [], "category": [], "knowledges": [], "titles": [],
-                "ids": [], "source_ids": [], "scores": []
+                "ids": [], "source_ids": [], "scores": [],"properties": []
             }
         # topic gate（任意）
         if topic_gate:
@@ -492,6 +603,7 @@ class RefactoredRetriever:
             "ids":        balanced["id"].tolist(),
             "source_ids": balanced["source_id"].tolist(),
             "scores":     balanced["blended_score"].tolist(),
+            "properties": balanced["properties"].tolist(),  # ★★★ これを追加！ ★★★
         }
         
     def _search_knowledge_fulltext_and_vector(
@@ -504,54 +616,80 @@ class RefactoredRetriever:
     ) -> pd.DataFrame:
         """
         非パーティションの Search Index(KnowledgesSearchAll) を使って
-        全文 × ベクトルで候補を取得 → 集計のみで正規化ブレンド（OVER()は使わない）。
+        全文 × ベクトルで候補を取得 → UNIONで結合して取りこぼしを防ぐ
         """
         q_compact = self.build_search_query(query_text, max_terms=5) or query_text
         token_expr = "TOKENLIST_CONCAT([body_token, title_token, memo_token, category_token])" if USE_TOKENLIST_CONCAT else "body_token"
+        
+        # SQL本体
         sql = f"""
-        WITH cand AS (
+        WITH 
+        vec_cand AS (
             SELECT
                 global_content_id AS id,
-                source_id,
-                content_id,
-                title,
-                url,
-                category,
-                {BODY_COLUMN_SPN} AS body,
-            COSINE_DISTANCE({VECTOR_COLUMN_SPN}, @qvec) AS vdist,
-            SCORE({token_expr}, @q, enhance_query=>TRUE) AS ft
-            FROM {KNOWLEDGES_TABLE}@{{FORCE_INDEX={SSEARCH_INDEX_NAME}}}
-            WHERE is_deprecated = FALSE
-            AND {VECTOR_COLUMN_SPN} IS NOT NULL
-            AND SEARCH({token_expr}, @q, enhance_query=>TRUE)
+                source_id, content_id, title, url, category, {BODY_COLUMN_SPN} AS body,
+                COSINE_DISTANCE({VECTOR_COLUMN_SPN}, @qvec) AS vdist,
+                0.0 AS ft_score_raw, 
+                'vec' as origin
+            FROM {KNOWLEDGES_TABLE}
+            WHERE is_deprecated = FALSE AND {VECTOR_COLUMN_SPN} IS NOT NULL
+            ORDER BY vdist ASC
             LIMIT @limit_cand
         ),
-        bounds AS (
-        SELECT
-            MIN(vdist) AS dmin,
-            MAX(vdist) AS dmax,
-            MIN(ft)    AS fmin,
-            MAX(ft)    AS fmax
-        FROM cand
+        ft_cand AS (
+            SELECT
+                global_content_id AS id,
+                source_id, content_id, title, url, category, {BODY_COLUMN_SPN} AS body,
+                2.0 AS vdist, 
+                SCORE({token_expr}, @q, enhance_query=>TRUE) AS ft_score_raw,
+                'ft' as origin
+            FROM {KNOWLEDGES_TABLE}@{{FORCE_INDEX={SSEARCH_INDEX_NAME}}}
+            WHERE is_deprecated = FALSE 
+              AND SEARCH({token_expr}, @q, enhance_query=>TRUE)
+            LIMIT @limit_cand
         ),
-        scored AS (
+        union_cand AS (
+            SELECT * FROM vec_cand
+            UNION ALL
+            SELECT * FROM ft_cand
+        ),
+        distinct_cand AS (
+            SELECT
+                id,
+                ANY_VALUE(source_id) as source_id,
+                ANY_VALUE(content_id) as content_id,
+                ANY_VALUE(title) as title,
+                ANY_VALUE(url) as url,
+                ANY_VALUE(category) as category,
+                ANY_VALUE(body) as body,
+                MIN(vdist) as vdist,
+                MAX(ft_score_raw) as ft
+            FROM union_cand
+            GROUP BY id
+        ),
+        bounds AS (
+            SELECT
+                MIN(vdist) AS dmin, MAX(vdist) AS dmax,
+                MIN(ft) AS fmin, MAX(ft) AS fmax
+            FROM distinct_cand
+        )
         SELECT
             c.id, c.source_id, c.content_id, c.title, c.url, c.category, c.body,
-            c.vdist, COALESCE(c.ft, 0) AS ft,
-            -- vnorm = (dmax - vdist) / (dmax - dmin)
-            SAFE_DIVIDE(b.dmax - c.vdist, NULLIF(b.dmax - b.dmin, 0)) AS vnorm,
-            -- fnorm = (ft - fmin) / (fmax - fmin)
-            SAFE_DIVIDE(COALESCE(c.ft,0) - COALESCE(b.fmin,0), NULLIF(b.fmax - b.fmin, 0)) AS fnorm
-            FROM cand c
-            CROSS JOIN bounds b
-            )
-        SELECT
-        id, source_id, content_id, title, url, category, body, vdist, ft,
-        (@alpha * vnorm) + (@beta * fnorm) AS blended_score
-        FROM scored
+            c.vdist, c.ft,
+            (@alpha * SAFE_DIVIDE(b.dmax - c.vdist, NULLIF(b.dmax - b.dmin, 0))) + 
+            (@beta * SAFE_DIVIDE(c.ft - b.fmin, NULLIF(b.fmax - b.fmin, 0))) 
+            AS blended_score,
+            ARRAY(
+                SELECT AS STRUCT p.property_type, p.property_value
+                FROM properties AS p
+                WHERE p.global_content_id = c.id
+            ) AS props_struct
+        FROM distinct_cand c
+        CROSS JOIN bounds b
         ORDER BY blended_score DESC, title ASC
         LIMIT @limit_final
         """
+        
         params = {
             "q": q_compact,
             "qvec": query_vector.tolist(),
@@ -568,20 +706,38 @@ class RefactoredRetriever:
             "alpha": param_types.FLOAT64,
             "beta": param_types.FLOAT64,
         }
+        
         rows: List[Dict[str, Any]] = []
         try:
             with self.spanner_db.snapshot() as snap:
-                for r in snap.execute_sql(sql, params=params, param_types=ptypes):
+                # ★修正箇所: query_options={"optimizer_version": "6"} を追加
+                result_proxy = snap.execute_sql(
+                    sql, 
+                    params=params, 
+                    param_types=ptypes,
+                    query_options={"optimizer_version": "6"} 
+                )
+                
+                for r in result_proxy:
+                    raw_props = r[10] 
+                    props_dict = {}
+                    if raw_props:
+                        for item in raw_props:
+                            props_dict[item[0]] = item[1]
+                    
                     rows.append({
                         "id": r[0], "source_id": r[1], "content_id": r[2], "title": r[3],
                         "url": r[4], "category": r[5], "body": r[6],
-                        "distance": float(r[7]),  # vdist
+                        "distance": float(r[7]), 
                         "ft": float(r[8]),
                         "blended_score": float(r[9]),
+                        "properties": props_dict,
                     })
+                    
         except Exception as e:
             self.logger.error(f"[fulltext_vec] Spanner error: {e}", exc_info=True)
             return pd.DataFrame()
+            
         if not rows:
             return pd.DataFrame()
             
@@ -701,7 +857,7 @@ class RefactoredRetriever:
                             continue
                         if len(surface) == 1:
                             continue
-                        if pos in ['名詞', '形容詞'] and surface not in self.stopwords:
+                        if pos in ['名詞','形容詞'] and surface not in self.stopwords:
                             tokens.append(surface)
                     break  # 正常終了したらリトライループを抜ける
                 except IndexError:

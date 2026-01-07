@@ -49,6 +49,10 @@ class AgentState(TypedDict):
     is_clarification_required: bool 
     # ★ 追加: 通過したルートの履歴記録用（デバッグ・分析用）
     route_history: List[str]
+    
+    # ▼▼▼ Plan-and-Execute用に追加 ▼▼▼
+    plan_queue: list[str]       # 未実行の検索クエリリスト
+    completed_steps: list[str]  # 実行済みのステップ（ログ用）
 
 
 # ----------------------------------------------------------------
@@ -131,22 +135,30 @@ class SupportOperationAgent:
             "retrieved_context": "",
         }
 
-    # Node: ポリシーゲート（修正：エスカレーションではなく「回答不可」として処理）
+
+    # Node: ポリシーゲート（再々々修正版：仕様確認・ロジック照会許容）
     def policy_gate(self, state: AgentState):
-        self.logger.info("---🚧 Node: policy_gate (Simpified)---")
+        self.logger.info("---🚧 Node: policy_gate (Improved v4)---")
         target_q = state.get("current_query") or state["user_question"]
 
         prompt = f"""
         次の質問がポリシー上、AIが回答すべきでない内容（個人情報照会、契約詳細など）か判定してください。
+        このシステムは「SmartHR」というSaaS製品の操作サポートです。
 
         # 判定基準
         ## 🚫 回答不可 (need_escalation: true)
         - 特定の企業の「契約内容」や「請求金額」の確認
-        - **特定の個人・従業員のデータ照会・操作依頼** (例:「Aさんの給与を教えて」「Bさんを削除して」)
-        - 法律的な判断・労務コンサルティング
+        - **AIに対して、直接的なデータ操作や照会を依頼するもの** (例:「Aさんのデータを今すぐ直して」「私の代わりに削除して」)
+          ※「AIが実行する」ことは不可能です。
+        - **個別の法的・税務的な判断（コンサルティング）**
 
         ## ✅ 回答OK (need_escalation: false)
-        - 一般的な機能の使い方、操作手順、仕様の質問
+        - 一般的な機能の使い方、操作手順、トラブルシューティング
+        - **「機能の有無」や「操作手順」に関する質問**
+          - 「データを間違って消した、復旧できるか？」という質問は、AIへの作業依頼ではなく、**「復旧機能はあるか（仕様）」「どう操作すれば戻るか（手順）」を聞いている**と解釈し、OKとしてください。
+          - 「削除の方法」や「訂正の方法」を聞かれた場合も、手順の案内としてOKとしてください。
+        - **画面上の特定の表示やメッセージが出る「条件」「原因」「仕様」に関する質問**
+        - **システム挙動の正当性確認**
 
         質問: {target_q}
         出力形式: {{"need_escalation": true/false, "reason": "理由"}}
@@ -159,47 +171,129 @@ class SupportOperationAgent:
 
         if is_ng:
             self.logger.info(f"    - Policy Blocked: {reason}")
-            # エスカレーション機能は廃止したため、ここで「回答不可」メッセージを作って会話終了ルートへ流す
             refusal_msg = (
                 "申し訳ありません。個人情報や契約詳細に関するお問い合わせ、"
-                "または法的な判断を要するご質問には、AIアシスタントではお答えできません。\n"
+                "または個別の法的・税務的な判断を要するご質問には、AIアシスタントではお答えできません。\n"
                 "お手数ですが、担当者へ直接お問い合わせいただけますようお願いいたします。"
             )
             return {
-                "route_decision": "conversational", # 会話終了ルートへ
+                "route_decision": "conversational",
                 "final_answer": refusal_msg
             }
 
-        # OKなら元のルートを維持
         return {"route_decision": state.get("route_decision", "retrieval")}
-        
-    # ★ escalate_to_human メソッドは完全に削除しました ★
 
-    # Node: 情報検索
+    # ----------------------------------------------------------
+    # ★ NEW: Planning Node (検索前のタスク分解)
+    # ----------------------------------------------------------
+    def make_plan(self, state: AgentState):
+        self.logger.info("---📅 Node: make_plan ---")
+        q = state["user_question"]
+        
+        # 複合的な質問かどうかを判断し、検索クエリのリストを作成する
+        # ※ ここで「検索不要」と判断されれば空リストを返して会話へ直行させる制御も可能
+        prompt = f"""
+        あなたは検索プランナーです。ユーザーの質問に回答するために必要な「検索クエリ」を洗い出し、実行順にリスト化してください。
+        
+        # 方針
+        - 単純な質問であれば、クエリは1つで十分です。
+        - 複合的な質問（例：「Aの設定方法とBの削除方法」）の場合、それぞれのクエリに分解してください。
+        - 質問が抽象的な場合、具体的ないくつかのキーワードに分解しても構いません。
+        - **最大5ステップ**まで設定可能です。網羅性を重視してください。
+        
+        # ユーザーの質問
+        {q}
+        
+        # 出力形式 (JSON)
+        {{
+            "queries": ["クエリ1", "クエリ2", ...]
+        }}
+        """
+        
+        resp = self._gen(prompt, response_mime_type="application/json", temperature=0.0)
+        try:
+            data = json.loads(getattr(resp, "text", "") or "{}")
+            queries = data.get("queries", [])
+        except:
+            # エラー時は元の質問をそのまま1つのクエリとして扱う
+            queries = [q]
+            
+        # 空の場合は最低1つ入れる（検索ルートに来ている前提のため）
+        if not queries:
+            queries = [q]
+
+        self.logger.info(f"    - Plan created: {queries}")
+        
+        return {
+            "plan_queue": queries,
+            "completed_steps": []
+        }
+
+    # ----------------------------------------------------------
+    # ★ NEW: Execution Dispatcher (計画実行ルーター)
+    # ----------------------------------------------------------
+    def execute_dispatch(self, state: AgentState):
+        """
+        plan_queue から次のクエリを取り出し、retrieve へ渡す準備をする。
+        キューが空なら generate へ進むためのフラグを返す。
+        """
+        queue = state.get("plan_queue", [])
+        
+        if not queue:
+            # 計画完了 -> 回答生成へ
+            return {"route_decision": "ready_to_answer"}
+        
+        # 次のタスクを取り出す
+        next_query = queue[0]
+        remaining_queue = queue[1:]
+        
+        self.logger.info(f"---🚀 Dispatch: Next query -> '{next_query}' ---")
+        
+        return {
+            "current_query": next_query,   # これが retrieve ノードで使われる
+            "plan_queue": remaining_queue, # キューを更新
+            "route_decision": "continue_search"
+        }
+        
+
+    # ----------------------------------------------------------
+    # Node: 情報検索 (改修: Append & Flag Merge)
+    # ----------------------------------------------------------
     def retrieve(self, state: AgentState):
-        self.logger.info("---🔎 Node: retrieve---")
+        self.logger.info("---🔎 Node: retrieve (Plan Execution)---")
         query = state['current_query']
         session_id = state.get('session_id')
         message_index = state.get('message_index')
 
+        # 1. 検索実行
         ai_context, human_context, search_meta = self.chatbot._get_information_for_query(
             query,
             session_id=session_id,
             message_index=message_index,
         )
-        is_knowledge_missing = search_meta.get("is_knowledge_missing", False)
+
+        # 2. フラグのOR統合 (過去にTrueならずっとTrue)
+        previous_missing = state.get("is_knowledge_missing", False)
+        current_missing = search_meta.get("is_knowledge_missing", False)
+        integrated_missing_flag = previous_missing or current_missing
         
+        if current_missing:
+            self.logger.warning(f"    ⚠️ Query '{query}' hit NO official knowledge.")
+
+        # 3. コンテキストの追記 (Append)
         existing_context = state.get('retrieved_context', '')
+        # 明示的に区切り線を入れる
         updated_context = (existing_context + f"\n\n--- 検索クエリ「{query}」の結果 ---\n" + (ai_context or "")).strip()
 
         existing_human_context = state.get('human_readable_context', '')
         updated_human_context = (existing_human_context + "\n" + (human_context or "")).strip() if existing_human_context else (human_context or "")
+        
         history = state.get("route_history", []) + ["retrieve"]
 
         return {
             "retrieved_context": updated_context,
             "human_readable_context": updated_human_context,
-            "is_knowledge_missing": is_knowledge_missing,
+            "is_knowledge_missing": integrated_missing_flag,
             "route_history": history,
         }
 
@@ -291,7 +385,7 @@ class SupportOperationAgent:
         )
 
         prompt = f"""
-        あなたは、SmartHRのカスタマーサポートチームに所属するエキスパートです。
+        あなたは、SmartHRのカスタマーサポートチームに所属するエキスパートの「AI」さんです。
         提供された「根拠情報」に基づいて、正確かつ親切な回答を生成してください。
 
         # 回答生成のルール
@@ -335,7 +429,7 @@ class SupportOperationAgent:
         )
 
         prompt = f"""
-        あなたは、SmartHRの親切なカスタマーサポートアシスタントです。
+        あなたは、SmartHRの親切なカスタマーサポートアシスタント「AI」さんです。
         「これまでの会話履歴」を参考に、お客様の現在の質問に対して自然な会話で応答してください。
 
         # 注意事項
@@ -353,14 +447,19 @@ class SupportOperationAgent:
         return {"final_answer": getattr(response, "text", "")}
 
 
-    # Node: 評価・計画
+    # Node: 評価・計画 (修正版)
     def grade_answer_and_plan(self, state: AgentState):
         self.logger.info("---🤔 Node: grade_answer_and_plan---")
         attempts = state.get("search_attempts", 0) + 1
         
         # 簡易実装: 回答が空ならinsufficient
         if not state.get("initial_answer"):
-             return {"sufficiency_decision": "insufficient", "search_attempts": attempts}
+             # ★修正: ここでも再検索できるようにキューに入れる（元の質問など）
+             return {
+                 "sufficiency_decision": "insufficient", 
+                 "search_attempts": attempts,
+                 "plan_queue": [state.get("user_question")] 
+             }
 
         prompt = f"""
         あなたは、カスタマーサポートエージェントの回答をレビューする品質管理者です。
@@ -373,46 +472,48 @@ class SupportOperationAgent:
         # 判定基準
         1. **Sufficient (十分)**:
            - 質問に対する具体的な手順、解決策、またはYes/Noが提示されている。
-           - **【重要例外】**: 公式マニュアル(ナレッジ)がなくても、過去の問い合わせ履歴(Past QA)を引用して、具体的なエラー解決策や回避策を提示できている場合は、「十分」と判定してください。
-           - 回答内で「〜でしょうか？」と状況確認の質問をしている場合も、会話を進めるために「十分」と判定してください。
+           - 公式マニュアル(ナレッジ)がなくても、過去の問い合わせ履歴(Past QA)を引用して回答できている場合は「十分」とする。
+           - 文脈上、ユーザーへの聞き返しが必要で、適切な質問をしている場合も「十分」とする。
 
         2. **Insufficient (不足)**:
            - 「情報が見つかりませんでした」「わかりません」という結論の場合。
-           - **ユーザーに対して状況確認や情報の追加を求めている場合（聞き返し）。**
            - 質問と回答がかみ合っていない場合。
 
         # 出力 (JSON形式のみ)
         {{
             "status": "sufficient" | "insufficient",
-            "next_query": "insufficientの場合のみ、次に検索すべきキーワード（※ユーザーへの質問文ではなく、検索エンジンに入力する単語）"
+            "next_query": "insufficientの場合のみ、次に検索すべきキーワード"
         }}
         """
         resp = self._gen(prompt, response_mime_type="application/json")
         result = json.loads(getattr(resp, "text", "") or "{}")
         status = result.get("status", "sufficient")
-        next_q = result.get("next_query", state["current_query"])
+        next_q = result.get("next_query", state["user_question"]) # fallbackは元の質問
 
         if status == "insufficient":
+            self.logger.info(f"    - 判定: Insufficient -> New Plan: {next_q}")
             return {
                 "sufficiency_decision": "insufficient",
                 "current_query": next_q,
+                "plan_queue": [next_q], # ★重要: ここでキューに追加することで、Dispatchがretrieveへ誘導する
                 "search_attempts": attempts
             }
         
         return {"sufficiency_decision": "sufficient", "search_attempts": attempts}
 
-    # Node: ファクトチェック
+    
+    # ----------------------------------------------------------
+    # Node: ファクトチェック (URLフィルタリング追加版)
+    # ----------------------------------------------------------
     def fact_check(self, state: AgentState):
         self.logger.info("---🔬 Node: fact_check---")
-        # （元の実装と同じ）
-        # 簡略化のため、常にOKとして通すか、元の厳密なチェックを残すかは自由ですが、
-        # ここでは元のロジックを維持します。
+        
         prompt = f"""
-        あなたは、カスタマーサポートの回答を監査する、極めて厳格な品質保証（QA）の専門家です。
+        あなたは、カスタマーサポートの回答を監査する、極めて厳格な品質保証（QA）の専門家「AI」さんです。
         あなたのタスクは2つあります。
 
         1.  **監査:** 「生成された回答」が「根拠情報」に基づいているか、特に「ユーザーの質問」の前提が誤っていないかを評価します。
-        2.  **清書 (監査OKの場合のみ):** もし監査の結果がOK (is_grounded: true) だった場合、回答をユーザー提示用の最終形式（根拠の引用付き）に清書します。その際、必ず根拠情報に含まれるURLを使用し、回答本文中の適切な単語にハイパーリンクを適用してください。形式は必ず **Markdown** `[表示したいテキスト](URL)` としてください。（例: 「操作手順については[管理者マニュアル](https://...)を参照してください」）
+        2.  **清書 (監査OKの場合のみ):** もし監査の結果がOK (is_grounded: true) だった場合、回答をユーザー提示用の最終形式に清書します。
 
         # 評価対象
         - **ユーザーの質問**: {state['user_question']}
@@ -423,20 +524,29 @@ class SupportOperationAgent:
         - ユーザーの質問の前提（例：「Aの後にBをする」）が、根拠情報（例：「Bの後にAをする」）と矛盾している場合、回答がその矛盾を指摘せず前提を肯定していれば、**NG**です。
         - 回答に、根拠情報にない情報や拡大解釈が含まれていれば、**NG**です。
 
+        # 【重要】URL引用とリンクのルール (★ここを厳守)
+        - 回答内にリンクを埋め込む際は、必ず **`https://support.smarthr.jp/ja/help/articles` で始まる公式ヘルプページのURLのみ** を使用してください。
+        - `https://app.intercom.com` やその他のURLは、社内用または顧客閲覧不可のため、**絶対に引用・リンクしないでください**。
+        - 根拠が「過去の回答(Past QA)」しかない場合は、内容は参考にして回答を作成し、**リンクは貼らないでください**。
+        
+        # 清書のフォーマット
+        - リンク形式: Markdown `[表示したいテキスト](https://support.smarthr.jp/...)`
+
+
         # 出力形式 (JSON)
         監査の結果、以下のどちらかの形式で出力してください。
 
         ## 1. 監査がOKだった場合
         {{
             "is_grounded": true,
-            "reason": "回答は根拠情報に基づいており、前提の誤りもありませんでした。",
-            "formatted_answer": "（ここに、回答本文と「**根拠情報:**」の引用ブロックを含む、清書済みの最終回答を生成する）"
+            "reason": "回答は根拠情報に基づいており、URLの規定も守られています。",
+            "formatted_answer": "（ここに、ルールに則って清書済みの最終回答を生成する）"
         }}
         
         ## 2. 監査がNGだった場合
         {{
             "is_grounded": false,
-            "reason": "（ここに、NGと判断した具体的な理由を記述する。例：ユーザーの誤った前提を肯定している...）",
+            "reason": "（ここに、NGと判断した具体的な理由を記述する。例：社内用URLが含まれている、根拠と矛盾する...）",
             "formatted_answer": null
         }}
 
@@ -450,23 +560,26 @@ class SupportOperationAgent:
         else:
             return {"fact_check_result": data}
 
-    # Node 6: rewrite_answer (修正版)
+    # ----------------------------------------------------------
+    # Node: rewrite_answer (URLフィルタリング追加版)
+    # ----------------------------------------------------------
     def rewrite_answer(self, state: AgentState):
         self.logger.info("---🔧 Node: rewrite_answer (fact check)---")
         reason = (state.get('fact_check_result') or {}).get('reason', '')
         
-        # ★ プロンプト修正: こちらもMarkdown形式を強制
         prompt = f"""
         ファクトチェックで指摘を受けました。指摘内容を踏まえ、必ず「根拠情報」のみで回答を**修正**し、ユーザーに提示する最終形式に清書してください。
 
-        # リンク埋め込みのルール (最重要)
-        根拠情報に含まれるURLを使用し、回答本文中の適切な単語にハイパーリンクを適用してください。
-        形式は必ず **Markdown** `[表示したいテキスト](URL)` としてください。
-        （例: 「操作手順については[管理者マニュアル](https://...)を参照してください」）
+        # 【重要】URL引用とリンクのルール (★ここを厳守)
+        1. **許可されるURL:** `https://support.smarthr.jp/ja/help/articles` で始まるURLのみ使用可能です。
+           これらをMarkdown形式 `[テキスト](URL)` で埋め込んでください。
+           
+        2. **禁止されるURL:**
+           `https://app.intercom.com` 等の社内URLや、上記以外のURLは**一切記載しないでください**。
+           もし根拠情報が「Intercomの過去ログ」のみの場合、内容は参考にしても良いですが、**URLやリンクは絶対に貼らないでください**。
 
         # 構成指示
-        1. 修正後の回答本文（リンク埋め込み済み）
-        2. 回答の末尾に、根拠となった情報の要約を「**根拠情報:**」として箇条書きで記載。
+        1. 修正後の回答本文（公式ヘルプへのリンクのみ埋め込み可）
 
         # ユーザーの質問: {state['user_question']}
         # 根拠情報: {state['retrieved_context']}
@@ -540,26 +653,33 @@ class SupportOperationAgent:
 # ----------------------------------------------------------------
 # 3. グラフ構築 (escalate_to_human ノード削除版)
 # ----------------------------------------------------------------
+
 def build_support_agent_graph(chatbot_instance: AdkChatbot):
     agent = SupportOperationAgent(chatbot_instance)
     workflow = StateGraph(AgentState)
 
     # === ノード登録 ===
+    # 既存ノード
     workflow.add_node("entry_router", agent.entry_router)
     workflow.add_node("classify_intent", agent.classify_intent)
     workflow.add_node("followup_classifier", agent.followup_classifier)
     workflow.add_node("policy_gate", agent.policy_gate)
-    # workflow.add_node("escalate_to_human", agent.escalate_to_human)  <-- 削除
     
-    workflow.add_node("check_ambiguity", agent.check_ambiguity) 
-    workflow.add_node("generate_conversational", agent.generate_conversational_answer)
-    workflow.add_node("finalize_conversational", agent.finalize_conversational_response)
+    # ★追加: Plan & Execute ノード
+    workflow.add_node("make_plan", agent.make_plan)
+    workflow.add_node("execute_dispatch", agent.execute_dispatch)
+
+    # 検索・生成系ノード
     workflow.add_node("retrieve", agent.retrieve)
     workflow.add_node("generate_retrieval", agent.generate_initial_answer)
     workflow.add_node("grade_and_plan", agent.grade_answer_and_plan)
+    workflow.add_node("check_ambiguity", agent.check_ambiguity) 
     workflow.add_node("fact_check", agent.fact_check)
     workflow.add_node("rewrite_fact", agent.rewrite_answer)
     workflow.add_node("finalize_retrieval", agent.finalize_retrieval_response)
+    
+    workflow.add_node("generate_conversational", agent.generate_conversational_answer)
+    workflow.add_node("finalize_conversational", agent.finalize_conversational_response)
 
     # === エントリーポイント ===
     workflow.set_entry_point("entry_router")
@@ -587,27 +707,47 @@ def build_support_agent_graph(chatbot_instance: AdkChatbot):
         "policy_gate": "policy_gate",
     })
 
-    # 4. ポリシーゲート -> 検索 or 会話(拒否メッセージ)
+    # 4. ポリシーゲート -> 【修正】検索が必要なら「make_plan」へ
     def pg_route(state: AgentState):
-        # policy_gate内で拒否(final_answer設定済)なら会話終了へ
         if state.get("final_answer"): 
-            return "finalize_conversational" # そのまま終了へ
+            return "finalize_conversational"
         
         rd = state.get("route_decision", "retrieval")
         if rd == "conversational":
             return "generate_conversational"
-        return "retrieve"
+        
+        # ★ここが重要: いきなり retrieve せず、まずは計画(Plan)へ
+        return "make_plan"
 
     workflow.add_conditional_edges("policy_gate", pg_route, {
         "finalize_conversational": "finalize_conversational",
         "generate_conversational": "generate_conversational",
-        "retrieve": "retrieve"
+        "make_plan": "make_plan" 
     })
 
-    # 5. 検索フロー
-    workflow.add_edge("retrieve", "generate_retrieval")
+    # 5. Planning -> Dispatch (計画したら実行管理へ)
+    workflow.add_edge("make_plan", "execute_dispatch")
+
+    # 6. Dispatch ループ (実行管理による振り分け)
+    def dispatch_route(state: AgentState):
+        # まだキューにクエリが残っていれば検索へ、なければ回答生成へ
+        if state.get("route_decision") == "continue_search":
+            return "retrieve"
+        return "generate_retrieval"
+
+    workflow.add_conditional_edges("execute_dispatch", dispatch_route, {
+        "retrieve": "retrieve",
+        "generate_retrieval": "generate_retrieval"
+    })
+
+    # ★重要: 検索が終わったら Dispatch に戻る (次のクエリがあるか確認するため)
+    workflow.add_edge("retrieve", "execute_dispatch")
+
+    # 7. 回答生成 -> 評価(Grade)
     workflow.add_edge("generate_retrieval", "grade_and_plan")
     
+    # 8. 評価結果による分岐 (ここでの再検索は、Plan外の補正なので retrieve へ直接戻しても良いが、
+    #    今回は grade_and_plan で plan_queue に追加する実装にしたため dispatch へ戻す)
     def grade_route(state: AgentState):
         if state.get("sufficiency_decision") == "insufficient":
             return "check_ambiguity"
@@ -618,18 +758,20 @@ def build_support_agent_graph(chatbot_instance: AdkChatbot):
         "fact_check": "fact_check"
     })
 
-    # 6. Ambiguity -> 再検索 or 終了
+    # 9. Ambiguity -> 再検索(Dispatch経由) or 終了
     def ambiguity_route(state: AgentState):
         if state.get("route_decision") == "ambiguous":
-            return "finalize_conversational" # 諦めて終了
-        return "retrieve" # 再検索
+            return "finalize_conversational" 
+        
+        # クリア(再検索)の場合は、Dispatchへ戻して再検索を実行
+        return "execute_dispatch"
 
     workflow.add_conditional_edges("check_ambiguity", ambiguity_route, {
         "finalize_conversational": "finalize_conversational",
-        "retrieve": "retrieve"
+        "execute_dispatch": "execute_dispatch"
     })
 
-    # 7. ファクトチェック後
+    # 10. ファクトチェック後
     def fact_route(state: AgentState):
         if state['fact_check_result'].get('is_grounded'):
             return "finalize_retrieval"
