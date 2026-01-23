@@ -6,7 +6,7 @@ import pandas as pd
 import textwrap
 import numpy as np
 from typing import Dict, Any, Optional
-
+import json
 from openai import AzureOpenAI
 
 # --- 修正されたRetrieverをインポート ---
