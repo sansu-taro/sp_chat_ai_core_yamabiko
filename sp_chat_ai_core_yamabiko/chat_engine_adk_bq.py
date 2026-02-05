@@ -118,7 +118,7 @@ class AdkChatbot:
     def _get_information_for_query(
             self,
             query: str,
-            session_id: Optional[str] = None,
+            conversation_id: Optional[str] = None,
             message_index: Optional[int] = None,
         ) -> tuple[str, str]:
         """
@@ -136,7 +136,7 @@ class AdkChatbot:
         search_results = self.retriever.search_all_sources(
             query_text=query,
             query_vector=query_vector,
-            session_id=session_id,
+            conversation_id=conversation_id,
             message_index=message_index,
         )
         # ★ 追加: メタデータの抽出 (Retrieverが返していれば)

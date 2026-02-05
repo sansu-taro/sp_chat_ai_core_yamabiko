@@ -1,6 +1,6 @@
 [project]
 name = "sp_chat_ai_core_yamabiko"
-version = "0.1.6"
+version = "0.1.7"
 description = "chat AI core yamabiko"
 requires-python = ">=3.10,<3.13"
 
@@ -35,6 +35,11 @@ packages = ["sp_chat_ai_core_yamabiko"]
 [build-system]
 requires = ["hatchling>=1.25.0"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "build>=1.4.0",
+]
 
 [tool.uv]  # あれば
 # uv 特有の設定があればここに追記

@@ -12,7 +12,6 @@ import logging
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 # ----------------------------------------------------------------
 # 1. Stateの定義 (エスカレーション用フィールドを削除・整理)
 # ----------------------------------------------------------------
@@ -54,6 +53,9 @@ class AgentState(TypedDict):
     plan_queue: list[str]       # 未実行の検索クエリリスト
     completed_steps: list[str]  # 実行済みのステップ（ログ用）
 
+    # ★ 追加: 最終アウトカム
+    final_outcome: str            # "answered" | "clarification" | "not_found" | "refused"
+    final_outcome_reason: str     # 任意（ログ分析用）
 
 # ----------------------------------------------------------------
 # 2. Agentクラス（シンプル化）
@@ -85,8 +87,8 @@ class SupportOperationAgent:
             "\n\n"
             "――――\n"
             "今回のご案内でご不明点は解消されましたでしょうか？\n"
-            "・同じ機能についての追加のご質問があれば、そのまま続けてお知らせください。\n"
-            "・専門の担当者へのお取次ぎをご希望の場合はオペレータの連絡を希望するボタンをご選択ください。"
+            #"・同じ機能についての追加のご質問があれば、そのまま続けてお知らせください。\n"
+            #"・専門の担当者へのお取次ぎをご希望の場合はオペレータの連絡を希望するボタンをご選択ください。"
             # 「担当者へのエスカレーション」の文言は削除
         )
         return (answer or "").rstrip() + tail
@@ -133,6 +135,8 @@ class SupportOperationAgent:
             "current_query": user_question,
             "search_attempts": 0,
             "retrieved_context": "",
+            "final_outcome": "",
+            "final_outcome_reason": "",
         }
 
 
@@ -178,7 +182,9 @@ class SupportOperationAgent:
             )
             return {
                 "route_decision": "conversational",
-                "final_answer": refusal_msg
+                "final_answer": refusal_msg,
+                "final_outcome": "refused",
+                "final_outcome_reason": reason or "policy_gate_blocked",
             }
 
         return {"route_decision": state.get("route_decision", "retrieval")}
@@ -222,6 +228,7 @@ class SupportOperationAgent:
         if not queries:
             queries = [q]
 
+        queries = queries[:5]
         self.logger.info(f"    - Plan created: {queries}")
         
         return {
@@ -262,13 +269,13 @@ class SupportOperationAgent:
     def retrieve(self, state: AgentState):
         self.logger.info("---🔎 Node: retrieve (Plan Execution)---")
         query = state['current_query']
-        session_id = state.get('session_id')
+        conversation_id = state.get('conversation_id')
         message_index = state.get('message_index')
 
         # 1. 検索実行
         ai_context, human_context, search_meta = self.chatbot._get_information_for_query(
             query,
-            session_id=session_id,
+            conversation_id=conversation_id,
             message_index=message_index,
         )
 
@@ -349,7 +356,9 @@ class SupportOperationAgent:
                  "route_decision": "ambiguous",
                  "final_answer": clarification_msg,
                  "is_clarification_required": True, # ★ フラグを立てる
-                 "route_history": history
+                 "route_history": history,
+                 "final_outcome": "clarification",
+                 "final_outcome_reason": "need_more_context",
              }
         
         # Ambiguousでない場合
@@ -364,7 +373,9 @@ class SupportOperationAgent:
                  "route_decision": "ambiguous", # 強制終了ルートへ
                  "final_answer": fallback_msg,
                  "is_clarification_required": False,
-                 "route_history": history
+                 "route_history": history,
+                 "final_outcome": "not_found",
+                 "final_outcome_reason": "max_attempts_reached",
              }
         
         # まだ検索できるなら再検索
@@ -389,18 +400,22 @@ class SupportOperationAgent:
         提供された「根拠情報」に基づいて、正確かつ親切な回答を生成してください。
 
         # 回答生成のルール
-        1. **情報の統合:** - 「関連ナレッジ」や「類似過去回答」から、質問に関連する情報を探してください。
+        1. **システム確認・個別調査の禁止と誘導:**
+           - 根拠情報の中に「システム側で確認します」「サブドメインや組織図名を教えてください」といった**個別の調査や確認を申し出る記述**がある場合、**AIであるあなたはそれを絶対に再現してはいけません。**
+           - 代わりに、**「この件はシステム的な確認が必要となる可能性があるため、有人サポート（オペレーター）へ直接お問い合わせください」** という案内へ書き換えてください。
+           - 決して「私（AI）が確認しますので情報を教えてください」と言わないでください。
+        2. **情報の統合:** - 「関連ナレッジ」や「類似過去回答」から、質問に関連する情報を探してください。
            - 完全な一致（「はい、可能です」など）がなくても、**機能の仕様や操作手順の記述から、質問に対する答えが論理的に導き出せる場合**は、それを回答として提示してください。
            - 例: 質問「管理者は編集できるか？」に対し、ナレッジに「編集画面から更新できます」とあれば、「はい、編集画面から更新可能です」と回答して構いません。
 
-        2. **情報源の優先:**
+        3. **情報源の優先:**
            - 「関連ナレッジ」の情報を最優先してください。「類似過去回答」は補足として扱います。
 
-        3. **推測の範囲:**
+        4. **推測の範囲:**
            - 根拠情報に全く記述がない機能や仕様については、決して創作しないでください。
            - ただし、一般的な操作（「保存ボタンを押す」など）や、文脈上明らかな主語（「操作画面」といえば通常はユーザー/管理者が操作する）については、補って説明しても構いません。
 
-        4. **情報不足の場合:**
+        5. **情報不足の場合:**
            - 上記を踏まえても答えが見つからない場合のみ、「恐れ入りますが、いただいた情報からでは明確なご案内が難しい状況です。」と回答してください。
 
         # これまでの会話履歴
@@ -523,10 +538,11 @@ class SupportOperationAgent:
         # 監査基準 (最優先)
         - ユーザーの質問の前提（例：「Aの後にBをする」）が、根拠情報（例：「Bの後にAをする」）と矛盾している場合、回答がその矛盾を指摘せず前提を肯定していれば、**NG**です。
         - 回答に、根拠情報にない情報や拡大解釈が含まれていれば、**NG**です。
+        - 回答内で「**弊社システム側で確認します**」「**サブドメインを教えてください**」「**調査します**」といった、AIには実行不可能なシステム調査や個人情報の聴取を行おうとしていないか？もし含まれていれば **NG** です。「システム確認が必要な場合は有人サポートへ誘導するべき」と指摘してください。
 
         # 【重要】URL引用とリンクのルール (★ここを厳守)
         - 回答内にリンクを埋め込む際は、必ず **`https://support.smarthr.jp/ja/help/articles` で始まる公式ヘルプページのURLのみ** を使用してください。
-        - `https://app.intercom.com` やその他のURLは、社内用または顧客閲覧不可のため、**絶対に引用・リンクしないでください**。
+        - `https://app.intercom.com` やその他のURL及びタイトルは、社内用または顧客閲覧不可のため、**絶対に引用・リンクしないでください**。
         - 根拠が「過去の回答(Past QA)」しかない場合は、内容は参考にして回答を作成し、**リンクは貼らないでください**。
         
         # 清書のフォーマット
@@ -596,12 +612,18 @@ class SupportOperationAgent:
         self.logger.info("---🏁 Node: finalize_retrieval_response---")
         base = state["initial_answer"]
         final = self._append_resolution_check(base)
-        return {"final_answer": final}
+        return {"final_answer": final,
+                "final_outcome": state.get("final_outcome") or "answered",
+                "final_outcome_reason": state.get("final_outcome_reason") or "",
+               }
 
     # Node: 最終化 (Conversational)
     def finalize_conversational_response(self, state: AgentState):
         self.logger.info("---🏁 Node: finalize_conversational_response---")
-        return {"final_answer": state['final_answer']}
+        return {"final_answer": state['final_answer'],
+                "final_outcome": state.get("final_outcome") or "answered",
+                "final_outcome_reason": state.get("final_outcome_reason") or "",
+               }
 
     # Node: フォローアップ分類
     def followup_classifier(self, state: AgentState):

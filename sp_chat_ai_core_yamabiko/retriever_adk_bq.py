@@ -24,13 +24,12 @@ import threading, unicodedata, hashlib
 _thread_local = threading.local()
 BIGQUERY_PROJECT_ID = "smarthr-customer-support"
 BIGQUERY_DATASET_ID = "sandbox"
+BIGQUERY_LOGSET_ID = "yamabiko_log"
 
 
-# VECTOR_TABLE_BQ = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.knowledges_vector_v2"
-# QA_TABLE_BQ     = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.knowledges_qa_part_id_fill"
 VECTOR_TABLE_BQ = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.knowledges_vector_v2_202411_202511"
 QA_TABLE_BQ     = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.knowledges_qa_part_id_fill_2025"
-LOG_TABLE_BQ    = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.retrieval_logs"
+LOG_TABLE_BQ    = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_LOGSET_ID}.retrieval_logs"
 
 SPANNER_PROJECT_ID  = "smarthr-customer-support"
 SPANNER_INSTANCE_ID = "smarthr-customer-support"
@@ -242,42 +241,10 @@ class RefactoredRetriever:
         query_text: str,
         query_vector: np.ndarray,
         top_n: int = 5,
-        session_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
         message_index: Optional[int] = None,
     ) -> Dict[str, Any]:
-        self.logger.info(f"検索開始: query='{query_text}', session_id='{session_id}'")
-        # 1) Spanner: 全文 × ベクトル（非パーティション index）
-        # sp_df = self._search_knowledge_fulltext_and_vector(
-        #     query_text=query_text,
-        #     query_vector=query_vector,
-        #     top_n=60,
-        #     alpha_vec=0.60, beta_ft=0.40
-        # )
-        
-        # if sp_df is None or sp_df.empty:
-        #     # フォールバック：従来のベクトル→BM25ブレンド
-        #     fb = self._search_knowledge_by_vector_and_bm25(
-        #         query_text=query_text,
-        #         query_vector=query_vector,
-        #         top_n_per_source=3,
-        #         initial_fetch_limit=100,
-        #         alpha_vec=0.60,
-        #         beta_bm25=0.40,
-        #         topic_gate=True,
-        #         topic_threshold=0.30,
-        #     )
-        #     knowledge_results = fb
-        # else:
-        #     knowledge_results = self._finalize_knowledge_candidates(
-        #         df=sp_df,
-        #         query_text=query_text,
-        #         top_n_per_source=3,
-        #         final_top_n=10,
-        #         #topic_gate=True,
-        #         topic_gate=False,
-        #         topic_threshold=0.30,
-        #         source_bias=None
-        #     )
+        self.logger.info(f"検索開始: query='{query_text}', session_id='{conversation_id}'")
 
         fb = self._search_knowledge_by_vector_and_bm25(
             query_text=query_text,
@@ -300,7 +267,7 @@ class RefactoredRetriever:
             query_text=query_text,
             knowledge_results=knowledge_results,
             best_responses=best_responses_df if isinstance(best_responses_df, pd.DataFrame) else pd.DataFrame(),
-            session_id=session_id,
+            conversation_id=conversation_id,
             message_index=message_index,
         )
         self.logger.info("検索完了")
@@ -336,22 +303,22 @@ class RefactoredRetriever:
         query_text: str,
         knowledge_results: Dict[str, Any],
         best_responses: pd.DataFrame,
-        session_id: Optional[str],
+        conversation_id: Optional[str],
         message_index: Optional[int],
     ):
         try:
             row = {
                 "log_timestamp": datetime.now(timezone.utc).isoformat(),
-                "session_id": session_id,
+                "conversation_id": conversation_id,
                 "message_index": message_index,
                 "query_text": query_text,
                 "retrieved_global_content_id": knowledge_results.get("ids", []),
                 "retrieved_knowledge_url": knowledge_results.get("url", []),
-                "retrieved_knowledge_bodies": knowledge_results.get("knowledges", []),
                 "retrieved_knowledge_categories": knowledge_results.get("category", []),
-                "retrieved_response_user_bodies": best_responses['body_user'].tolist() if not best_responses.empty else [],
-                "retrieved_response_admin_bodies": best_responses['body_admin'].tolist() if not best_responses.empty else [],
+                "retrieved_knowledge_scores": knowledge_results.get("scores", []),
+                "retrieved_response_id": best_responses['response_id'].tolist() if not best_responses.empty else [],
                 "retrieved_response_scores": best_responses['blended_score'].tolist() if not best_responses.empty else [],
+                
             }
             errors = self.bq_client.insert_rows_json(LOG_TABLE_BQ, [row])
             if not errors:
@@ -361,26 +328,6 @@ class RefactoredRetriever:
         except Exception as e:
             self.logger.error(f"BigQueryログ書込エラー: {e}", exc_info=True)
 
-    # ---------- Similar Conversations (BQ Vector) ----------
-    # def _search_similar_conversations_by_vector_bq(self, query_vector: np.ndarray, top_n: int = VEC_TOPK) -> List[Dict[str, Any]]:
-    #     sql = f"""
-    #     SELECT conversation_id, COSINE_DISTANCE(vector, @query_vector) AS distance
-    #     FROM `{VECTOR_TABLE_BQ}`
-    #     ORDER BY distance
-    #     LIMIT @limit
-    #     """
-    #     job_config = bigquery.QueryJobConfig(
-    #         query_parameters=[
-    #             bigquery.ArrayQueryParameter("query_vector", "FLOAT64", query_vector.tolist()),
-    #             bigquery.ScalarQueryParameter("limit", "INT64", top_n),
-    #         ]
-    #     )
-    #     try:
-    #         rows = list(self.bq_client.query(sql, job_config=job_config).result())
-    #         return [{"conversation_id": r.conversation_id, "distance": float(r.distance)} for r in rows]
-    #     except Exception as e:
-    #         self.logger.error(f"会話検索エラー: {e}", exc_info=True)
-    #         return []
 
 
     # ---------- Similar Conversations (BQ Vector) 最適化入----------
@@ -409,17 +356,9 @@ class RefactoredRetriever:
         LIMIT @limit
         """
         
-        # VECTOR_SEARCHは絞り込みで減る可能性があるので、要求(top_n)の倍くらい候補を取るのが定石です
+        # VECTOR_SEARCHは絞り込みで減る可能性があるので、要求(top_n)の倍くらい候補を取る
         fetch_k = top_n * 2 
 
-        # job_config = bigquery.QueryJobConfig(
-        #     query_parameters=[
-        #         bigquery.ArrayQueryParameter("query_vector", "FLOAT64", query_vector.tolist()),
-        #         bigquery.ScalarQueryParameter("limit", "INT64", top_n),
-        #         bigquery.ScalarQueryParameter("fetch_k", "INT64", fetch_k),
-        #         bigquery.ScalarQueryParameter("search_since", "STRING", search_since),
-        #     ]
-        # )
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ArrayQueryParameter("query_vector", "FLOAT64", query_vector.tolist()),
@@ -755,7 +694,7 @@ class RefactoredRetriever:
         sql = f"""
         SELECT
           CAST(conversation_id AS STRING) AS conversation_id,
-          body_user, body_admin, intercom_part_url
+          body_user, body_admin, intercom_part_url,response_id
         FROM `{QA_TABLE_BQ}`
         WHERE CAST(conversation_id AS STRING) IN UNNEST(@conv_ids)
         """
@@ -819,7 +758,7 @@ class RefactoredRetriever:
 
         return df_final[[
             "conversation_id", "body_user", "body_admin", "intercom_part_url",
-            "bm25_raw", "bm25_norm", "vec_sim_norm", "blended_score"
+            "bm25_raw", "bm25_norm", "vec_sim_norm", "blended_score","response_id"
         ]]
 
     # ---------- Text utils ----------
