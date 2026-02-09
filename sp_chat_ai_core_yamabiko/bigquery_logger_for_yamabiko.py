@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone,timedelta
 from google.cloud import bigquery
 from typing import Optional, Dict, Any
 
@@ -48,10 +48,20 @@ class BigQueryLogger:
             final_outcome = state.get("final_outcome")
             final_outcome_reason = state.get("final_outcome_reason")
 
+            # --- 日時の生成 (変更点) ---
+            # JST (UTC+9) のタイムゾーンを定義
+            JST = timezone(timedelta(hours=9))
+            # 現在のJST時刻を取得
+            now_jst = datetime.now(JST)
+            # DATETIME型用にフォーマット (例: "2023-10-27 15:30:00.123456")
+            # ※ isoformat()だとタイムゾーン情報(+09:00)が付与され、DATETIME型への挿入でエラーになる可能性があるため明示的に除去
+            created_at_str = now_jst.strftime('%Y-%m-%d %H:%M:%S.%f')
+
             # 行データの構築
             row = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "created_at": created_at_str,
                 "conversation_id": state.get("conversation_id"),
+                "session_id": state.get("session_id"),
                 "message_index": state.get("message_index"),
                 "user_question": state.get("user_question"),
                 "final_answer": state.get("final_answer"),
@@ -76,6 +86,8 @@ class BigQueryLogger:
                 "final_outcome": final_outcome,
                 # 任意（テーブルに追加しているなら）
                 "final_outcome_reason": final_outcome_reason,
+                # ★ 追加: 処理時間 (秒)
+                "processing_time_sec": state.get("processing_time"),
             }
 
             # BigQueryへ挿入

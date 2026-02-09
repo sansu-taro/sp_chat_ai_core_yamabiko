@@ -119,6 +119,7 @@ class AdkChatbot:
             self,
             query: str,
             conversation_id: Optional[str] = None,
+            session_id: Optional[str] = None,
             message_index: Optional[int] = None,
         ) -> tuple[str, str]:
         """
@@ -137,6 +138,7 @@ class AdkChatbot:
             query_text=query,
             query_vector=query_vector,
             conversation_id=conversation_id,
+            session_id=session_id,
             message_index=message_index,
         )
         # ★ 追加: メタデータの抽出 (Retrieverが返していれば)

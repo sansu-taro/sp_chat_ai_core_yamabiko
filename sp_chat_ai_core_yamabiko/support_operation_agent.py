@@ -6,15 +6,13 @@ from google.genai import types
 from typing import TypedDict, Annotated, List, Sequence
 import operator
 import json
+import time
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 import logging
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-# ----------------------------------------------------------------
-# 1. Stateの定義 (エスカレーション用フィールドを削除・整理)
-# ----------------------------------------------------------------
 class AgentState(TypedDict):
 
     # ▼▼▼ APPからの受け渡しフィールド ▼▼▼
@@ -56,6 +54,9 @@ class AgentState(TypedDict):
     # ★ 追加: 最終アウトカム
     final_outcome: str            # "answered" | "clarification" | "not_found" | "refused"
     final_outcome_reason: str     # 任意（ログ分析用）
+    # ★ 追加: 時間計測用
+    start_time: float       # 処理開始時のUNIXタイムスタンプ
+    processing_time: float  # 最終的にかかった秒数
 
 # ----------------------------------------------------------------
 # 2. Agentクラス（シンプル化）
@@ -86,10 +87,9 @@ class SupportOperationAgent:
         tail = (
             "\n\n"
             "――――\n"
-            "今回のご案内でご不明点は解消されましたでしょうか？\n"
-            #"・同じ機能についての追加のご質問があれば、そのまま続けてお知らせください。\n"
-            #"・専門の担当者へのお取次ぎをご希望の場合はオペレータの連絡を希望するボタンをご選択ください。"
-            # 「担当者へのエスカレーション」の文言は削除
+            "追加のご質問の場合は、続けてこちらでお問い合わせください。\n"
+            "これまでのご質問内容を踏まえてご案内いたします。（※対象機能名は再度選択いただく必要がございます）\n"
+            "有人サポートに切り替える場合は「解決しましたか？」の回答後、追加で「質問する」> 「オペレーターへ接続」へお進みください。"
         )
         return (answer or "").rstrip() + tail
 
@@ -98,6 +98,8 @@ class SupportOperationAgent:
     # ----------------------------------------------------------
     def entry_router(self, state: AgentState):
         self.logger.info("---🚪 Node: entry_router ---")
+        # 開始時刻を記録 (Stateに無ければ現在時刻)
+        start_time = state.get("start_time") or time.time()
         messages = state.get("messages", [])
         has_ai_before = any(not isinstance(m, HumanMessage) for m in messages[:-1]) if messages else False
         
@@ -105,7 +107,9 @@ class SupportOperationAgent:
             phase = "after_answer"
         else:
             phase = "new"
-        return {"conversation_phase": phase}
+        return {"conversation_phase": phase,
+                "start_time": start_time
+               }
         
     # Node: 意図分類
     def classify_intent(self, state: AgentState):
@@ -270,12 +274,14 @@ class SupportOperationAgent:
         self.logger.info("---🔎 Node: retrieve (Plan Execution)---")
         query = state['current_query']
         conversation_id = state.get('conversation_id')
+        session_id =  state.get('session_id')
         message_index = state.get('message_index')
 
         # 1. 検索実行
         ai_context, human_context, search_meta = self.chatbot._get_information_for_query(
             query,
             conversation_id=conversation_id,
+            session_id=session_id,
             message_index=message_index,
         )
 
@@ -610,19 +616,29 @@ class SupportOperationAgent:
     # Node: 最終化 (Retrieval)
     def finalize_retrieval_response(self, state: AgentState):
         self.logger.info("---🏁 Node: finalize_retrieval_response---")
+        # ★ 時間計算
+        start_ts = state.get("start_time", time.time())
+        duration = time.time() - start_ts
+        
         base = state["initial_answer"]
         final = self._append_resolution_check(base)
         return {"final_answer": final,
                 "final_outcome": state.get("final_outcome") or "answered",
                 "final_outcome_reason": state.get("final_outcome_reason") or "",
+                "processing_time": duration,  # ★ 計算結果をStateへ
                }
 
     # Node: 最終化 (Conversational)
     def finalize_conversational_response(self, state: AgentState):
         self.logger.info("---🏁 Node: finalize_conversational_response---")
+        # ★ 時間計算
+        start_ts = state.get("start_time", time.time())
+        duration = time.time() - start_ts
+        
         return {"final_answer": state['final_answer'],
                 "final_outcome": state.get("final_outcome") or "answered",
                 "final_outcome_reason": state.get("final_outcome_reason") or "",
+                "processing_time": duration,
                }
 
     # Node: フォローアップ分類

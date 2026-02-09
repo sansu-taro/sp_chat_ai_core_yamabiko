@@ -7,7 +7,7 @@ from typing import List, Set, Dict, Any, Optional
 
 import numpy as np
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from rank_bm25 import BM25Okapi
 from pathlib import Path
 
@@ -242,6 +242,7 @@ class RefactoredRetriever:
         query_vector: np.ndarray,
         top_n: int = 5,
         conversation_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         message_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         self.logger.info(f"検索開始: query='{query_text}', session_id='{conversation_id}'")
@@ -268,6 +269,7 @@ class RefactoredRetriever:
             knowledge_results=knowledge_results,
             best_responses=best_responses_df if isinstance(best_responses_df, pd.DataFrame) else pd.DataFrame(),
             conversation_id=conversation_id,
+            session_id=session_id,
             message_index=message_index,
         )
         self.logger.info("検索完了")
@@ -304,12 +306,22 @@ class RefactoredRetriever:
         knowledge_results: Dict[str, Any],
         best_responses: pd.DataFrame,
         conversation_id: Optional[str],
+        session_id: Optional[str],
         message_index: Optional[int],
     ):
+        # --- 日時の生成 (変更点) ---
+        # JST (UTC+9) のタイムゾーンを定義
+        JST = timezone(timedelta(hours=9))
+        # 現在のJST時刻を取得
+        now_jst = datetime.now(JST)
+        # DATETIME型用にフォーマット (例: "2023-10-27 15:30:00.123456")
+        # ※ isoformat()だとタイムゾーン情報(+09:00)が付与され、DATETIME型への挿入でエラーになる可能性があるため明示的に除去
+        created_at_str = now_jst.strftime('%Y-%m-%d %H:%M:%S.%f')
         try:
             row = {
-                "log_timestamp": datetime.now(timezone.utc).isoformat(),
+                "created_at": created_at_str,
                 "conversation_id": conversation_id,
+                "session_id": session_id,
                 "message_index": message_index,
                 "query_text": query_text,
                 "retrieved_global_content_id": knowledge_results.get("ids", []),
